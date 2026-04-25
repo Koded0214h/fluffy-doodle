@@ -154,6 +154,11 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle freeform text messages."""
     from handlers.reminders import detect_reminder_in_text
+    from handlers.onboarding import handle_onboarding
+
+    # Route to onboarding if user hasn't finished setup
+    if await handle_onboarding(update, context):
+        return
 
     user_id = update.effective_user.id
     text = update.message.text.strip()

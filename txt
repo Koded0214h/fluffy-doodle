@@ -6,10 +6,17 @@ del - Delete a task
 clear - Wipe all active tasks for a fresh start
 opps - View all open opportunities and deadlines
 opp - View full details of an opportunity
-addobp - AI parse opportunity text/link (paste text after)
+addobp - AI parse opportunity text (paste text after command)
 dopp - Mark an opportunity as applied or done
 delopp - Delete an opportunity
-remindme - Set a reminder (e.g. /remindme in 10 mins)
+editopp - Edit an opportunity field (deadline, notes, link, type)
+remindme - Set a reminder (e.g. /remindme in 10 mins check email)
 summary - Generate your weekly AI summary recap
-settings - Change how your AI behaves or sounds
+findopps - Scan the web for opportunities matched to your profile
+apply - Generate a personalized application draft for an opportunity
+settings - View and update your profile, personality, and preferences
 help - Get the full usage guide
+
+
+
+claude --resume 2d639f12-7f39-495d-9e3e-d11e45cec98f 

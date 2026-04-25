@@ -7,13 +7,17 @@ import re
 from datetime import date, datetime
 from telegram import Update
 from telegram.ext import ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database import (
     get_tasks, get_task_by_id, add_task, update_task, delete_task, mark_task_done,
     get_opportunities, get_opportunity_by_id, add_opportunity, update_opportunity,
     delete_opportunity, mark_opportunity_done, clear_tasks, get_week_logs,
-    upsert_user, get_user
+    upsert_user, get_user, get_opportunity_by_link
 )
-from gemini import generate_weekly_summary, parse_opportunity_from_text
+from gemini import (
+    generate_weekly_summary, parse_opportunity_from_text,
+    generate_opp_search_queries, filter_and_extract_opportunities, generate_application_draft
+)
 
 TRACK_EMOJI = {
     "skurel": "💼", "teenovatex": "🔬", "stackd": "🎓", "setld": "🏠",
@@ -29,66 +33,158 @@ TYPE_EMOJI = {
 # ── /start ─────────────────────────────────────────────────────────────────
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from handlers.onboarding import PERSONALITY_PROMPT
     user = update.effective_user
-    await upsert_user(user.id, username=user.username)
-    
-    msg = f"""🧠 *KODED OS — Online*
+    db_user = await get_user(user.id)
 
-Welcome {user.first_name}. Your personal AI chief of staff is live.
+    if db_user and db_user.get("onboarding_complete"):
+        name = db_user.get("name") or user.first_name
+        await update.message.reply_text(
+            f"🧠 *KODED OS — Online*\n\nWelcome back, {name}. What are we getting done today?",
+            parse_mode="Markdown"
+        )
+        return
 
-📸 Snap your task list → I read + schedule reminders
-🎙️ Voice note → transcribed + logged
-💬 Text anything → tasks, opps, updates
-⏰ Proactive pings throughout the day
+    if db_user:
+        # Mid-onboarding re-entry — re-prompt the current step
+        step = db_user.get("onboarding_step", 0)
+        if step == 1:
+            await update.message.reply_text("Still here! What's your name? 👋")
+        elif step == 2:
+            name = db_user.get("name", "")
+            from handlers.onboarding import AI_PROMPT_TEMPLATE
+            await update.message.reply_text(
+                f"Hey {name}! Still waiting for your profile — use the prompt above to generate it and paste it here.",
+                parse_mode="Markdown"
+            )
+        elif step == 3:
+            await update.message.reply_text(PERSONALITY_PROMPT, parse_mode="Markdown")
+        else:
+            await upsert_user(user.id, onboarding_step=1)
+            await update.message.reply_text(
+                "👋 Hey! I'm *KODED OS* — your personal AI chief of staff.\n\nWhat's your name?",
+                parse_mode="Markdown"
+            )
+        return
 
-*Customization:*
-/settings [text] — Configure how I behave or sound. 
-Example: `/settings You are JARVIS from Ironman. Be formal and call me Sir.`
-
-*Task commands:*
-/tasks — view active tasks
-/task [id] — view task details
-/done [id] — mark task done
-/edit [id] [text] — edit a task
-/del [id] — delete a task
-/clear — wipe all active tasks
-
-*Opportunity commands:*
-/opps — view all opportunities
-/opp [id] — view opportunity details
-/addobp [paste opp text] — AI parses deadline + details
-/dopp [id] — mark opportunity done
-/delopp [id] — delete an opportunity
-
-*Other:*
-/summary — weekly AI summary
-/help — full usage guide"""
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    # Brand new user
+    await upsert_user(user.id, username=user.username, onboarding_step=1)
+    await update.message.reply_text(
+        "👋 Hey! I'm *KODED OS* — your personal AI chief of staff.\n\nWhat's your name?",
+        parse_mode="Markdown"
+    )
 
 
 # ── /settings ──────────────────────────────────────────────────────────────
 
+_PERSONALITY_LABELS = {
+    "casual": "Casual & direct",
+    "formal": "Formal & professional",
+    "honest": "Brutally honest",
+    "hype": "Hype mode",
+}
+
+
 async def settings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not context.args:
+    args = context.args
+
+    if not args:
         user = await get_user(user_id)
-        current_context = user.get("context") if user else "Not set (using default Koded context)"
-        msg = f"""⚙️ *Your AI Settings*
+        if not user or not user.get("onboarding_complete"):
+            await update.message.reply_text("Complete setup first with /start")
+            return
 
-*Current Behavior/Context:*
-{current_context}
+        personality = _PERSONALITY_LABELS.get(user.get("bot_personality", "casual"), "Casual & direct")
+        standup = "ON" if user.get("morning_standup", 1) else "OFF"
+        evening = "ON" if user.get("evening_summary", 1) else "OFF"
+        has_bio = "Set ✅" if user.get("bio_text") else "Not set ❌"
 
-To change how I behave or sound, use:
-`/settings [your instructions here]`
-
-Example:
-`/settings You are a pirate assistant. End every sentence with Arrr!`"""
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await update.message.reply_text(
+            f"⚙️ *Your Settings*\n\n"
+            f"*Personality:* {personality}\n"
+            f"*Morning standup:* {standup}\n"
+            f"*Evening summary:* {evening}\n"
+            f"*Profile bio:* {has_bio}\n\n"
+            f"*Change anything:*\n"
+            f"`/settings personality casual|formal|honest|hype`\n"
+            f"`/settings standup on|off`\n"
+            f"`/settings evening on|off`\n"
+            f"`/settings bio [paste new profile here]`\n"
+            f"`/settings context [custom AI instructions]`",
+            parse_mode="Markdown"
+        )
         return
 
-    new_context = " ".join(context.args)
-    await upsert_user(user_id, context=new_context)
-    await update.message.reply_text("✅ Settings updated. I'll behave as you requested from now on.", parse_mode="Markdown")
+    subcommand = args[0].lower()
+
+    if subcommand == "personality":
+        valid = ("casual", "formal", "honest", "hype")
+        if len(args) < 2 or args[1].lower() not in valid:
+            await update.message.reply_text(
+                "Usage: `/settings personality casual|formal|honest|hype`", parse_mode="Markdown"
+            )
+            return
+        p = args[1].lower()
+        await upsert_user(user_id, bot_personality=p)
+        await update.message.reply_text(
+            f"✅ Personality set to *{_PERSONALITY_LABELS[p]}*", parse_mode="Markdown"
+        )
+
+    elif subcommand == "standup":
+        if len(args) < 2 or args[1].lower() not in ("on", "off"):
+            await update.message.reply_text("Usage: `/settings standup on|off`", parse_mode="Markdown")
+            return
+        val = 1 if args[1].lower() == "on" else 0
+        await upsert_user(user_id, morning_standup=val)
+        await update.message.reply_text(
+            f"✅ Morning standup *{'ON' if val else 'OFF'}*", parse_mode="Markdown"
+        )
+
+    elif subcommand == "evening":
+        if len(args) < 2 or args[1].lower() not in ("on", "off"):
+            await update.message.reply_text("Usage: `/settings evening on|off`", parse_mode="Markdown")
+            return
+        val = 1 if args[1].lower() == "on" else 0
+        await upsert_user(user_id, evening_summary=val)
+        await update.message.reply_text(
+            f"✅ Evening summary *{'ON' if val else 'OFF'}*", parse_mode="Markdown"
+        )
+
+    elif subcommand == "bio":
+        new_bio = " ".join(args[1:]).strip()
+        if not new_bio:
+            await update.message.reply_text(
+                "Paste your new profile after the command:\n"
+                "`/settings bio [your AI-generated profile text here]`",
+                parse_mode="Markdown"
+            )
+            return
+        if len(new_bio) < 60:
+            await update.message.reply_text(
+                "That's too short — paste the full AI-generated profile for best results."
+            )
+            return
+        await upsert_user(user_id, bio_text=new_bio)
+        await update.message.reply_text("✅ Profile updated. I'll use this from now on.", parse_mode="Markdown")
+
+    elif subcommand == "context":
+        new_context = " ".join(args[1:]).strip()
+        if not new_context:
+            await update.message.reply_text(
+                "Usage: `/settings context [custom AI instructions]`", parse_mode="Markdown"
+            )
+            return
+        await upsert_user(user_id, context=new_context)
+        await update.message.reply_text(
+            "✅ Custom AI instructions saved. This overrides your profile.", parse_mode="Markdown"
+        )
+
+    else:
+        # Legacy: treat all args as a custom context override
+        new_context = " ".join(args)
+        await upsert_user(user_id, context=new_context)
+        await update.message.reply_text("✅ Settings updated.", parse_mode="Markdown")
 
 
 # ── /help ──────────────────────────────────────────────────────────────────
@@ -460,3 +556,124 @@ async def summary_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     opps = await get_opportunities(user_id, done=False)
     summary = await generate_weekly_summary(user_id, logs, tasks, opps)
     await update.message.reply_text(f"📊 *Weekly Summary*\n\n{summary}", parse_mode="Markdown")
+
+
+# ── /findopps ──────────────────────────────────────────────────────────────
+
+async def findopps_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/findopps — discover opportunities based on user profile."""
+    from scraper import fetch_raw_opportunities
+
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+
+    if not user or not user.get("onboarding_complete"):
+        await update.message.reply_text("Complete setup first with /start")
+        return
+
+    await update.message.reply_text("🔍 Scanning for opportunities relevant to you...")
+
+    queries = await generate_opp_search_queries(user_id)
+    raw = await fetch_raw_opportunities(queries)
+
+    if not raw:
+        await update.message.reply_text("😔 Couldn't fetch results right now. Try again in a bit.")
+        return
+
+    await update.message.reply_text(f"⚙️ Got {len(raw)} results — filtering for what's relevant to you...")
+
+    opps = await filter_and_extract_opportunities(user_id, raw)
+
+    if not opps:
+        await update.message.reply_text(
+            "Nothing that matches your profile this round. I'll keep scanning — check back later or run /findopps again."
+        )
+        return
+
+    # Add to DB, skip duplicates by link
+    added = []
+    skipped = 0
+    for opp in opps:
+        link = (opp.get("link") or "").rstrip("/")
+        if link and await get_opportunity_by_link(user_id, link):
+            skipped += 1
+            continue
+        opp_id = await add_opportunity(
+            user_id=user_id,
+            title=opp.get("title", "Untitled"),
+            opp_type=opp.get("type", "general"),
+            deadline=opp.get("deadline"),
+            notes=opp.get("notes"),
+            link=link or None,
+            auto_discovered=1,
+        )
+        added.append({**opp, "id": opp_id})
+
+    if not added:
+        skip_note = f" ({skipped} already in your list)" if skipped else ""
+        await update.message.reply_text(f"No new opportunities found this round{skip_note}.")
+        return
+
+    lines = [f"🎯 *{len(added)} new opportunities found:*\n"]
+    for o in added:
+        emoji = TYPE_EMOJI.get(o.get("type", "general"), "📌")
+        dl = f" — `{o['deadline']}`" if o.get("deadline") else ""
+        lines.append(f"{emoji} `[{o['id']}]` *{o['title']}*{dl}")
+        why = o.get("why_relevant") or o.get("notes", "")
+        if why:
+            lines.append(f"   _{why}_\n")
+
+    if skipped:
+        lines.append(f"\n_{skipped} already in your list, skipped._")
+    lines.append("\n`/apply [id]` — get a personalized draft + checklist for any of these")
+    lines.append("`/opp [id]` — view details")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ── /apply ─────────────────────────────────────────────────────────────────
+
+async def apply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/apply [opp_id] — generate personalized application draft + checklist."""
+    user_id = update.effective_user.id
+    args = context.args
+
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: `/apply 3`", parse_mode="Markdown")
+        return
+
+    opp = await get_opportunity_by_id(user_id, int(args[0]))
+    if not opp:
+        await update.message.reply_text(f"❌ No opportunity with ID `{args[0]}`", parse_mode="Markdown")
+        return
+
+    await update.message.reply_text("✍️ Drafting your application...")
+
+    draft = await generate_application_draft(user_id, opp)
+
+    # Create a task so it's on their list
+    task_title = f"Apply: {opp['title']}"
+    await add_task(user_id=user_id, title=task_title, track="general")
+
+    checklist = "\n".join([f"☐ {item}" for item in draft.get("checklist", [])])
+    tips = "\n".join([f"• {tip}" for tip in draft.get("tips", [])])
+    deadline_line = f"*Deadline:* `{opp['deadline']}`\n" if opp.get("deadline") else ""
+
+    msg = (
+        f"✍️ *Application: {opp['title']}*\n"
+        f"{deadline_line}"
+        f"\n*Cover Letter / Intro:*\n{draft.get('cover_letter', '')}\n"
+        f"\n*Checklist:*\n{checklist}\n"
+        f"\n*Tips to stand out:*\n{tips}\n"
+        f"\n_Task added: \"{task_title}\" — /done when submitted._"
+    )
+
+    # Inline button to open application link directly
+    keyboard = None
+    if opp.get("link"):
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Apply Now 🚀", url=opp["link"])]])
+
+    try:
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=keyboard)
+    except Exception:
+        await update.message.reply_text(msg, reply_markup=keyboard)

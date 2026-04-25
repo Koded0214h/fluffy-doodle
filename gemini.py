@@ -100,11 +100,52 @@ def _generate_json(prompt, extra_parts=None) -> dict:
 
 # ── Public API ─────────────────────────────────────────────────────────────
 
+_PERSONALITY_DESCRIPTIONS = {
+    "casual": "Casual and direct — like a smart friend who knows everything going on. Not corporate, not stiff.",
+    "formal": "Formal and professional — precise, structured, respectful. Clear and composed at all times.",
+    "honest": "Brutally honest — no sugarcoating, call things out directly. Real talk, always.",
+    "hype": "High energy hype mode — motivating, enthusiastic, always pumping them up.",
+}
+
+
 async def get_effective_context(user_id: int) -> str:
-    """Fetch user-specific context or fallback to default."""
+    """Build per-user AI context from bio + personality, or fall back to default."""
     user = await get_user(user_id)
-    if user and user.get("context"):
+    if not user:
+        return KODED_CONTEXT
+
+    # Custom context override takes priority
+    if user.get("context"):
         return user["context"]
+
+    # Dynamic context built from user's profile
+    if user.get("bio_text") and user.get("name"):
+        name = user["name"]
+        bio = user["bio_text"]
+        personality = _PERSONALITY_DESCRIPTIONS.get(
+            user.get("bot_personality", "casual"),
+            _PERSONALITY_DESCRIPTIONS["casual"]
+        )
+        return f"""You are KODED OS — the personal AI chief of staff for {name}.
+
+ABOUT {name.upper()}:
+{bio}
+
+YOUR PERSONALITY:
+{personality}
+- You're their second brain — know everything about what's going on in their life
+- Short and punchy for reminders, detailed when explicitly asked
+- Help them stay focused, not overwhelmed
+- Honest when things pile up, encouraging when they win
+
+YOUR JOB:
+- Parse daily task lists from photos, voice notes, or text
+- Schedule proactive reminders throughout the day
+- Track opportunities (hackathons, deadlines, pitches, internships)
+- Morning standup and evening wind-down
+- Weekly summaries every Sunday
+- Be the system that holds everything together so they can focus on building"""
+
     return KODED_CONTEXT
 
 
@@ -221,19 +262,27 @@ The user just texted: "{text}"
 
 Determine if this contains:
 - Tasks to add (add_task)
-- An opportunity to track (add_opportunity)
+- An opportunity to track (add_opportunity) - Note: Social media links (Instagram, LinkedIn, etc.) should be treated as opportunities.
 - A standup update (standup)
 - Just chatting (general_chat)
 
-Extract structured data and write a natural response.
+Rules for Opportunities:
+- If the user shares a link (e.g., Instagram, LinkedIn, Twitter/X) without much text, assume it's an opportunity.
+- **NEVER** tell the user to "review" the link in your response. Instead, tell them you've tracked it.
+- Title: If no title is clear, use a descriptive placeholder like "Opportunity from Instagram" or "LinkedIn Post".
+- Notes: If details are thin, write "Click the link to see the full post and details."
 
 Return ONLY valid JSON:
 {{
     "intent": "add_task|add_opportunity|standup|general_chat",
     "tasks": [{{"title": "...", "track": "...", "due_time": "HH:MM or null"}}],
-    "opportunity": {{"title": "...", "type": "hackathon|internship|deadline|event", "deadline": "YYYY-MM-DD or null", "notes": "..."}},
+    "opportunity": {{"title": "...", "type": "hackathon|internship|deadline|event|general", "deadline": "YYYY-MM-DD or null", "notes": "..."}},
     "response": "..."
-}}"""
+}}
+
+Examples:
+1. "https://instagram.com/p/..." -> {{"intent": "add_opportunity", "opportunity": {{"title": "Instagram Opportunity", "type": "general", "notes": "Click link for details."}}, "response": "🎯 Got that Instagram link! I've added it to your opportunities so you don't lose it."}}
+"""
 
     result = _generate_json(prompt)
     if not result:
@@ -250,17 +299,19 @@ async def parse_opportunity_from_text(user_id: int, text: str) -> dict:
 
 {_get_date_context()}
 
-The user pasted this opportunity text. Extract all key details:
+The user pasted this opportunity text or link. Extract all key details:
 
 TEXT:
 {text}
 
 Rules:
-- title: short, clear name for this opportunity (max 80 chars)
+- title: short, clear name for this opportunity (max 80 chars). 
+- If it is just a social media link (Instagram, LinkedIn, etc.), use a title like "Opportunity from [Platform]".
 - type: one of hackathon, internship, deadline, event, grant, competition, general
 - deadline: extract the application/submission deadline as YYYY-MM-DD. If no deadline found, return null.
 - link: extract any URL present, or null
-- notes: 1-2 sentence summary of what this opportunity is and why it matters
+- notes: 1-2 sentence summary of what this opportunity is and why it matters. 
+- If it's a social media link with no description, use "Click link for full post and details."
 
 Return ONLY valid JSON, no markdown:
 {{"title": "...", "type": "...", "deadline": "YYYY-MM-DD or null", "link": "... or null", "notes": "..."}}"""
@@ -271,23 +322,29 @@ Return ONLY valid JSON, no markdown:
     return result
 
 
-async def generate_reminder(user_id: int, task: dict, tasks_remaining: list) -> str:
-    """Generate a contextual reminder ping for a specific task."""
+async def generate_reminder(user_id: int, task: dict, tasks_remaining: list, level: str = "10m") -> str:
+    """Generate a contextual reminder ping. level: '30m' | '10m' | 'now'"""
     context = await get_effective_context(user_id)
     remaining_titles = [t["title"] for t in tasks_remaining[:5]]
+
+    urgency = {
+        "30m": f'This task is coming up in ~30 minutes: "{task["title"]}". Give a heads-up so they can wrap up whatever they\'re doing and prepare.',
+        "10m": f'This task starts in ~10 minutes: "{task["title"]}". Be direct and urgent — time to move.',
+        "now": f'It\'s time for: "{task["title"]}". This is due RIGHT NOW. Short, sharp, get them moving.',
+    }.get(level, f'Reminder: "{task["title"]}"')
+
     prompt = f"""{context}
 
-Time to remind the user about: "{task['title']}" (track: {task.get('track', 'general')})
+{urgency}
+Track: {task.get('track', 'general')}
+Other pending tasks today: {remaining_titles}
 
-Other tasks still pending today: {remaining_titles}
-
-Write a SHORT, punchy reminder (2-3 sentences max).
-Be direct. No fluff. Include relevant emoji."""
+Write a SHORT, punchy reminder (2 sentences max). No fluff. Relevant emoji."""
 
     try:
         return _generate(prompt)
     except Exception:
-        return f"⏰ Reminder: {task['title']}"
+        return f"⏰ {task['title']}"
 
 
 async def generate_morning_standup(user_id: int) -> str:
@@ -373,3 +430,107 @@ Be like a trusted advisor who knows them well. Real, direct, caring."""
         return _generate(prompt)
     except Exception:
         return "📊 Weekly summary unavailable — Gemini's having a moment. Check your logs manually."
+
+
+# ── Opportunity Discovery ───────────────────────────────────────────────────
+
+async def generate_opp_search_queries(user_id: int) -> list[str]:
+    """Generate targeted search queries from the user's profile."""
+    context = await get_effective_context(user_id)
+    prompt = f"""{context}
+
+{_get_date_context()}
+
+Based on this user's profile, generate 4 targeted web search queries to find relevant opportunities.
+Think: hackathons, internships, grants, fellowships, competitions, accelerators, programs.
+Account for their location (Nigeria/Africa), their tech stack, career stage, and goals.
+
+Return ONLY valid JSON — a dict with a "queries" key containing a list of strings:
+{{"queries": ["query 1", "query 2", "query 3", "query 4"]}}
+
+Make queries specific and include the current year. Examples:
+"Africa fintech hackathon 2026", "Nigeria software developer internship 2026 remote" """
+
+    result = _generate_json(prompt)
+    queries = result.get("queries", []) if isinstance(result, dict) else []
+    if not queries:
+        return ["Africa tech hackathon 2026", "Nigeria developer internship 2026", "web3 hackathon 2026 open"]
+    return queries
+
+
+async def filter_and_extract_opportunities(user_id: int, raw_results: list[dict]) -> list[dict]:
+    """
+    Filter raw search results for relevance and return structured opportunity data.
+    Each result: {title, type, deadline, link, notes, why_relevant}
+    """
+    context = await get_effective_context(user_id)
+
+    raw_text = "\n\n".join([
+        f"Source: {r.get('source', 'web')}\nTitle: {r['title']}\nURL: {r['url']}\nSnippet: {r['snippet']}"
+        for r in raw_results
+        if r.get("title") and r.get("url")
+    ])
+
+    prompt = f"""{context}
+
+{_get_date_context()}
+
+Here are raw search results. Filter for opportunities genuinely relevant to this user and extract structured data.
+
+RAW RESULTS:
+{raw_text}
+
+Rules:
+- Only include opportunities relevant to this user's profile, skills, and goals
+- Skip expired opportunities (deadline already passed based on current date)
+- Skip irrelevant results (news articles, job boards for unrelated fields, etc.)
+- deadline: extract as YYYY-MM-DD if visible in the text, else null
+- type: one of hackathon, internship, grant, competition, fellowship, event, general
+- notes: 1–2 sentence description of what it is and why it's relevant to THIS specific user
+- link: the direct URL to the opportunity page
+- why_relevant: one short sentence explaining relevance to this user
+- Return max 8, ranked by relevance
+
+Return ONLY valid JSON:
+{{
+    "opportunities": [
+        {{"title": "...", "type": "...", "deadline": "YYYY-MM-DD or null", "link": "...", "notes": "...", "why_relevant": "..."}}
+    ]
+}}"""
+
+    result = _generate_json(prompt)
+    return result.get("opportunities", []) if isinstance(result, dict) else []
+
+
+async def generate_application_draft(user_id: int, opp: dict) -> dict:
+    """
+    Generate a personalized application draft, checklist, and tips for an opportunity.
+    Returns {cover_letter, checklist, tips}
+    """
+    context = await get_effective_context(user_id)
+    prompt = f"""{context}
+
+{_get_date_context()}
+
+The user wants to apply for this opportunity:
+Title: {opp.get('title')}
+Type: {opp.get('type', 'general')}
+Deadline: {opp.get('deadline') or 'Not specified'}
+Details: {opp.get('notes') or opp.get('title')}
+
+Generate:
+1. cover_letter — A punchy 2–3 paragraph intro/cover letter tailored to this user and this specific opportunity. First person. Genuine, not generic. Highlight their most relevant projects and skills.
+2. checklist — 5–7 specific things they need to prepare or submit (tailored to the opportunity type and any requirements visible in the details)
+3. tips — 2–3 specific tips to make their application stand out, based on their background and the opportunity
+
+Return ONLY valid JSON:
+{{"cover_letter": "...", "checklist": ["item 1", "item 2", ...], "tips": ["tip 1", "tip 2", ...]}}"""
+
+    result = _generate_json(prompt)
+    if not result:
+        return {
+            "cover_letter": f"I'm excited to apply for {opp.get('title', 'this opportunity')}.",
+            "checklist": ["Review requirements", "Prepare portfolio/CV", "Write your application", "Submit before deadline"],
+            "tips": ["Be specific about your projects", "Show impact with numbers where possible"],
+        }
+    return result

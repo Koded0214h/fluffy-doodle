@@ -6,14 +6,14 @@ import logging
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from telegram import Update
 
-from config import BOT_TOKEN, ALLOWED_USER_ID
+from config import BOT_TOKEN
 from database import init_db
 from scheduler import setup_scheduler
 from handlers.commands import (
     start_handler, help_handler, settings_handler,
     tasks_handler, task_detail_handler, done_handler, edit_task_handler, delete_task_handler, clear_handler,
     opportunities_handler, opp_detail_handler, add_opp_handler, done_opp_handler, delete_opp_handler, edit_opp_handler,
-    summary_handler
+    summary_handler, findopps_handler, apply_handler
 )
 from handlers.messages import text_message_handler, photo_handler, voice_handler
 from handlers.reminders import remindme_handler
@@ -36,6 +36,8 @@ def main():
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CommandHandler("settings", settings_handler))
     app.add_handler(CommandHandler("summary", summary_handler))
+    app.add_handler(CommandHandler("findopps", findopps_handler))
+    app.add_handler(CommandHandler("apply", apply_handler))
     app.add_handler(CommandHandler("remindme", remindme_handler))
 
     # Tasks
