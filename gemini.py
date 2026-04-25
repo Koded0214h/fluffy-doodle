@@ -9,6 +9,7 @@ import re
 from datetime import datetime
 import google.generativeai as genai
 from config import GEMINI_API_KEYS, GEMINI_MODEL, KODED_CONTEXT
+from database import get_user
 
 logger = logging.getLogger(__name__)
 
