@@ -126,3 +126,53 @@ async def get_week_logs() -> list[dict]:
         )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+async def get_task_by_id(task_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+async def update_task(task_id: int, **fields) -> bool:
+    allowed = {"title", "track", "due_time", "remind_at", "notes", "done"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return False
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [task_id]
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", values)
+        await db.commit()
+    return True
+
+async def delete_task(task_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+async def get_opportunity_by_id(opp_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM opportunities WHERE id = ?", (opp_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+async def update_opportunity(opp_id: int, **fields) -> bool:
+    allowed = {"title", "type", "deadline", "notes", "link", "done"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return False
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [opp_id]
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(f"UPDATE opportunities SET {set_clause} WHERE id = ?", values)
+        await db.commit()
+    return True
+
+async def delete_opportunity(opp_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM opportunities WHERE id = ?", (opp_id,))
+        await db.commit()
+        return cur.rowcount > 0
