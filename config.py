@@ -10,7 +10,11 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEYS = [
+    os.getenv("GEMINI_API_KEY_1", ""),
+    os.getenv("GEMINI_API_KEY_2", ""),
+    os.getenv("GEMINI_API_KEY_3", ""),
+]
 GEMINI_MODEL = "gemini-2.5-flash"
 
 KODED_CONTEXT = """
