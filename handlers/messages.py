@@ -15,6 +15,15 @@ from gemini import (
 
 logger = logging.getLogger(__name__)
 
+
+async def _reply(message, text: str):
+    """Send with Markdown; fall back to plain text if parse fails."""
+    try:
+        await message.reply_text(text, parse_mode="Markdown")
+    except Exception:
+        await message.reply_text(text)
+
+
 TRACK_EMOJI = {
     "skurel": "💼", "teenovatex": "🔬", "stackd": "🎓",
     "unilag": "📚", "microsoft": "🏢", "personal": "👤", "general": "📌"
@@ -84,7 +93,7 @@ _{vibe}_
 
 I'll ping you as the day goes on. Let's get it 🔥"""
 
-    await update.message.reply_text(reply, parse_mode="Markdown")
+    await _reply(update.message, reply)
 
 
 # ── Voice Handler ──────────────────────────────────────────────────────────
