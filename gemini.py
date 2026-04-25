@@ -8,7 +8,11 @@ import logging
 import re
 from datetime import datetime
 import google.generativeai as genai
-from config import GEMINI_API_KEYS, GEMINI_MODEL, KODED_CONTEXT
+import httpx
+from config import (
+    GEMINI_API_KEYS, GEMINI_MODEL, KODED_CONTEXT,
+    NVIDIA_API_KEY, NVIDIA_MODEL
+)
 from database import get_user
 
 logger = logging.getLogger(__name__)
@@ -33,7 +37,36 @@ def _rotate_key():
     logger.info(f"🔄 Rotated to Gemini key #{_current_key_index + 1}")
 
 
-def _generate(prompt, extra_parts=None) -> str:
+async def _nvidia_generate(prompt: str) -> str:
+    """Fallback to NVIDIA (Llama 3.1) if Gemini is down."""
+    if not NVIDIA_API_KEY:
+        return ""
+    
+    logger.info("⚡ Falling back to NVIDIA API...")
+    url = "https://integrate.api.nvidia.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {NVIDIA_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": NVIDIA_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "top_p": 0.7,
+        "max_tokens": 1024,
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.error(f"NVIDIA fallback failed: {e}")
+        return ""
+
+
+async def _generate(prompt, extra_parts=None) -> str:
     """
     Core generation function with automatic key rotation on 429.
     extra_parts: list of image/audio parts to include alongside prompt.
@@ -53,6 +86,13 @@ def _generate(prompt, extra_parts=None) -> str:
                 continue
             logger.error(f"Gemini error: {e}")
             raise e
+    
+    # All Gemini keys failed, try NVIDIA (text only)
+    if not extra_parts:
+        nv_res = await _nvidia_generate(prompt)
+        if nv_res:
+            return nv_res
+            
     return "⚠️ All Gemini keys are rate limited right now. Try again in a bit."
 
 
@@ -74,7 +114,7 @@ When parsing dates or times, always use this as your reference. Never guess or a
 """
 
 
-def _generate_json(prompt, extra_parts=None) -> dict:
+async def _generate_json(prompt, extra_parts=None) -> dict:
     """Generate and parse JSON response, with key rotation built in."""
     for attempt in range(len(GEMINI_API_KEYS)):
         try:
@@ -89,12 +129,23 @@ def _generate_json(prompt, extra_parts=None) -> dict:
             logger.error(f"JSON parse error: {e}")
             return {}
         except Exception as e:
-            if "429" in str(e) or "quota"     in str(e).lower():
+            if "429" in str(e) or "quota" in str(e).lower():
                 logger.warning(f"Key #{_current_key_index + 1} rate limited. Rotating...")
                 _rotate_key()
                 continue
             logger.error(f"Gemini error: {e}")
             return {}
+            
+    # Fallback to NVIDIA
+    if not extra_parts:
+        nv_res = await _nvidia_generate(prompt)
+        if nv_res:
+            try:
+                cleaned = _clean_json(nv_res)
+                return json.loads(cleaned)
+            except json.JSONDecodeError:
+                return {}
+
     return {}
 
 
@@ -165,7 +216,7 @@ Respond naturally as the user's personal AI chief of staff. If the message conta
 Keep it conversational and punchy. No markdown headers in replies — just clean text with occasional emojis."""
 
     try:
-        return _generate(prompt)
+        return await _generate(prompt)
     except Exception:
         return "⚠️ Gemini had a moment. Try again in a sec."
 
@@ -200,7 +251,7 @@ Return ONLY valid JSON. No explanation, no markdown fences:
 }}"""
 
     image_part = {"mime_type": mime_type, "data": image_bytes}
-    result = _generate_json(prompt, extra_parts=[image_part])
+    result = await _generate_json(prompt, extra_parts=[image_part])
 
     if not result:
         return {"tasks": [], "summary": "Couldn't read the list clearly", "vibe_check": "Send a clearer snap next time 📸"}
@@ -238,7 +289,7 @@ Return ONLY valid JSON:
 }}"""
 
     audio_part = {"mime_type": mime_type, "data": audio_bytes}
-    result = _generate_json(prompt, extra_parts=[audio_part])
+    result = await _generate_json(prompt, extra_parts=[audio_part])
 
     if not result:
         return {
@@ -284,7 +335,7 @@ Examples:
 1. "https://instagram.com/p/..." -> {{"intent": "add_opportunity", "opportunity": {{"title": "Instagram Opportunity", "type": "general", "notes": "Click link for details."}}, "response": "🎯 Got that Instagram link! I've added it to your opportunities so you don't lose it."}}
 """
 
-    result = _generate_json(prompt)
+    result = await _generate_json(prompt)
     if not result:
         return {"intent": "general_chat", "tasks": [], "opportunity": {}, "response": await chat_with_gemini(user_id, text)}
     return result
@@ -316,7 +367,7 @@ Rules:
 Return ONLY valid JSON, no markdown:
 {{"title": "...", "type": "...", "deadline": "YYYY-MM-DD or null", "link": "... or null", "notes": "..."}}"""
 
-    result = _generate_json(prompt)
+    result = await _generate_json(prompt)
     if not result:
         return {"title": text[:80], "type": "general", "deadline": None, "link": None, "notes": ""}
     return result
@@ -342,7 +393,7 @@ Other pending tasks today: {remaining_titles}
 Write a SHORT, punchy reminder (2 sentences max). No fluff. Relevant emoji."""
 
     try:
-        return _generate(prompt)
+        return await _generate(prompt)
     except Exception:
         return f"⏰ {task['title']}"
 
@@ -365,7 +416,7 @@ Write a short, energetic morning check-in message (3-5 sentences):
 Keep it punchy, not corporate."""
 
     try:
-        return _generate(prompt)
+        return await _generate(prompt)
     except Exception:
         return "🌅 Morning! What's on deck today? Drop your list and I'll keep you on track."
 
@@ -395,7 +446,7 @@ Write an evening wind-down message (4-6 sentences):
 Real talk, not corporate. Max 1-2 emojis."""
 
     try:
-        return _generate(prompt)
+        return await _generate(prompt)
     except Exception:
         return f"🌙 Day done. {len(done)} tasks wrapped, {len(pending)} still pending. How'd it go?"
 
@@ -427,7 +478,7 @@ Write a comprehensive weekly summary (8-12 sentences):
 Be like a trusted advisor who knows them well. Real, direct, caring."""
 
     try:
-        return _generate(prompt)
+        return await _generate(prompt)
     except Exception:
         return "📊 Weekly summary unavailable — Gemini's having a moment. Check your logs manually."
 
@@ -451,7 +502,7 @@ Return ONLY valid JSON — a dict with a "queries" key containing a list of stri
 Make queries specific and include the current year. Examples:
 "Africa fintech hackathon 2026", "Nigeria software developer internship 2026 remote" """
 
-    result = _generate_json(prompt)
+    result = await _generate_json(prompt)
     queries = result.get("queries", []) if isinstance(result, dict) else []
     if not queries:
         return ["Africa tech hackathon 2026", "Nigeria developer internship 2026", "web3 hackathon 2026 open"]
@@ -498,7 +549,7 @@ Return ONLY valid JSON:
     ]
 }}"""
 
-    result = _generate_json(prompt)
+    result = await _generate_json(prompt)
     return result.get("opportunities", []) if isinstance(result, dict) else []
 
 
@@ -526,7 +577,7 @@ Generate:
 Return ONLY valid JSON:
 {{"cover_letter": "...", "checklist": ["item 1", "item 2", ...], "tips": ["tip 1", "tip 2", ...]}}"""
 
-    result = _generate_json(prompt)
+    result = await _generate_json(prompt)
     if not result:
         return {
             "cover_letter": f"I'm excited to apply for {opp.get('title', 'this opportunity')}.",
