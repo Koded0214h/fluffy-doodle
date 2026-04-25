@@ -1,0 +1,15 @@
+tasks - View your active task list
+task - View full details of a specific task
+done - Mark a task as completed
+edit - Edit a task's title or due time
+del - Delete a task
+clear - Wipe all active tasks for a fresh start
+opps - View all open opportunities and deadlines
+opp - View full details of an opportunity
+addobp - AI parse opportunity text/link (paste text after)
+dopp - Mark an opportunity as applied or done
+delopp - Delete an opportunity
+remindme - Set a reminder (e.g. /remindme in 10 mins)
+summary - Generate your weekly AI summary recap
+settings - Change how your AI behaves or sounds
+help - Get the full usage guide

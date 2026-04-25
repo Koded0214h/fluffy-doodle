@@ -21,11 +21,12 @@ TRACK_EMOJI = {
 }
 
 
-async def _save_tasks(tasks: list) -> list:
+async def _save_tasks(user_id: int, tasks: list) -> list:
     """Persist extracted tasks to DB and return them with their IDs."""
     saved = []
     for t in tasks:
         task_id = await add_task(
+            user_id=user_id,
             title=t.get("title", "Unnamed task"),
             track=t.get("track", "general"),
             due_time=t.get("due_time"),
@@ -48,13 +49,14 @@ def _format_task_list(tasks: list) -> str:
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Parse a snapped task list photo."""
+    user_id = update.effective_user.id
     await update.message.reply_text("👀 Reading your list...")
 
     photo = update.message.photo[-1]  # highest resolution
     file = await context.bot.get_file(photo.file_id)
     image_bytes = await file.download_as_bytearray()
 
-    result = await parse_task_list_from_image(bytes(image_bytes))
+    result = await parse_task_list_from_image(user_id, bytes(image_bytes))
 
     tasks = result.get("tasks", [])
     summary = result.get("summary", "")
@@ -66,11 +68,11 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    saved = await _save_tasks(tasks)
+    saved = await _save_tasks(user_id, tasks)
 
     # Log as standup
     task_titles = ", ".join([t["title"] for t in saved])
-    await log_standup(str(date.today()), "photo_list", task_titles)
+    await log_standup(user_id, str(date.today()), "photo_list", task_titles)
 
     # Build reply
     task_list_str = _format_task_list(saved)
@@ -89,13 +91,14 @@ I'll ping you as the day goes on. Let's get it 🔥"""
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Transcribe and parse a voice note."""
+    user_id = update.effective_user.id
     await update.message.reply_text("🎙️ Listening...")
 
     voice = update.message.voice
     file = await context.bot.get_file(voice.file_id)
     audio_bytes = await file.download_as_bytearray()
 
-    result = await parse_voice_message(bytes(audio_bytes), mime_type="audio/ogg")
+    result = await parse_voice_message(user_id, bytes(audio_bytes), mime_type="audio/ogg")
 
     intent = result.get("intent", "general_chat")
     response = result.get("response", "Got it.")
@@ -105,17 +108,18 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Save based on intent
     if intent == "add_task" and tasks:
-        saved = await _save_tasks(tasks)
+        saved = await _save_tasks(user_id, tasks)
         task_list_str = _format_task_list(saved)
         reply = f"""🎙️ *Heard you!* Logged {len(saved)} task(s):
 
 {task_list_str}
 
 {response}"""
-        await log_standup(str(date.today()), "voice", transcript[:300])
+        await log_standup(user_id, str(date.today()), "voice", transcript[:300])
 
     elif intent == "add_opportunity" and opportunity.get("title"):
         opp_id = await add_opportunity(
+            user_id=user_id,
             title=opportunity.get("title", ""),
             opp_type=opportunity.get("type", "general"),
             deadline=opportunity.get("deadline"),
@@ -127,7 +131,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply += f"\n\n{response}"
 
     elif intent == "standup":
-        await log_standup(str(date.today()), "voice_standup", transcript[:300])
+        await log_standup(user_id, str(date.today()), "voice_standup", transcript[:300])
         reply = response
 
     else:
@@ -142,6 +146,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     """Handle freeform text messages."""
     from handlers.reminders import detect_reminder_in_text
 
+    user_id = update.effective_user.id
     text = update.message.text.strip()
 
     # Check for natural language reminders first
@@ -153,26 +158,28 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if any(t in text.lower() for t in done_triggers):
         # Let Gemini handle it as general chat with context
         reply = await chat_with_gemini(
+            user_id,
             text,
             extra_context="User seems to be marking something as done. Acknowledge it and encourage them."
         )
         await update.message.reply_text(reply)
         return
 
-    result = await parse_text_for_tasks(text)
+    result = await parse_text_for_tasks(user_id, text)
     intent = result.get("intent", "general_chat")
     response = result.get("response", "")
     tasks = result.get("tasks", [])
     opportunity = result.get("opportunity", {})
 
     if intent == "add_task" and tasks:
-        saved = await _save_tasks(tasks)
+        saved = await _save_tasks(user_id, tasks)
         task_list_str = _format_task_list(saved)
         reply = f"✅ Logged {len(saved)} task(s):\n\n{task_list_str}\n\n{response}"
-        await log_standup(str(date.today()), "text", text[:300])
+        await log_standup(user_id, str(date.today()), "text", text[:300])
 
     elif intent == "add_opportunity" and opportunity.get("title"):
         await add_opportunity(
+            user_id=user_id,
             title=opportunity.get("title", ""),
             opp_type=opportunity.get("type", "general"),
             deadline=opportunity.get("deadline"),
@@ -184,7 +191,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         reply += f"\n\n{response}"
 
     elif intent == "standup":
-        await log_standup(str(date.today()), "text_standup", text[:300])
+        await log_standup(user_id, str(date.today()), "text_standup", text[:300])
         reply = response
 
     else:

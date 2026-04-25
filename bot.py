@@ -10,7 +10,7 @@ from config import BOT_TOKEN, ALLOWED_USER_ID
 from database import init_db
 from scheduler import setup_scheduler
 from handlers.commands import (
-    start_handler, help_handler,
+    start_handler, help_handler, settings_handler,
     tasks_handler, task_detail_handler, done_handler, edit_task_handler, delete_task_handler, clear_handler,
     opportunities_handler, opp_detail_handler, add_opp_handler, done_opp_handler, delete_opp_handler, edit_opp_handler,
     summary_handler
@@ -30,11 +30,11 @@ async def post_init(application: Application) -> None:
 
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    auth = filters.User(user_id=ALLOWED_USER_ID) if ALLOWED_USER_ID else filters.ALL
 
     # Core
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("help", help_handler))
+    app.add_handler(CommandHandler("settings", settings_handler))
     app.add_handler(CommandHandler("summary", summary_handler))
     app.add_handler(CommandHandler("remindme", remindme_handler))
 
@@ -55,9 +55,9 @@ def main():
     app.add_handler(CommandHandler("editopp", edit_opp_handler))
 
     # Messages
-    app.add_handler(MessageHandler(auth & filters.TEXT & ~filters.COMMAND, text_message_handler))
-    app.add_handler(MessageHandler(auth & filters.PHOTO, photo_handler))
-    app.add_handler(MessageHandler(auth & filters.VOICE, voice_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.add_handler(MessageHandler(filters.VOICE, voice_handler))
 
     logger.info("🚀 Polling started...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

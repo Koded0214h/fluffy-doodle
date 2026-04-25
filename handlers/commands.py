@@ -10,7 +10,8 @@ from telegram.ext import ContextTypes
 from database import (
     get_tasks, get_task_by_id, add_task, update_task, delete_task, mark_task_done,
     get_opportunities, get_opportunity_by_id, add_opportunity, update_opportunity,
-    delete_opportunity, mark_opportunity_done, clear_tasks, get_week_logs
+    delete_opportunity, mark_opportunity_done, clear_tasks, get_week_logs,
+    upsert_user, get_user
 )
 from gemini import generate_weekly_summary, parse_opportunity_from_text
 
@@ -28,36 +29,66 @@ TYPE_EMOJI = {
 # ── /start ─────────────────────────────────────────────────────────────────
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = """🧠 *KODED OS — Online*
+    user = update.effective_user
+    await upsert_user(user.id, username=user.username)
+    
+    msg = f"""🧠 *KODED OS — Online*
 
-Your personal AI chief of staff is live.
+Welcome {user.first_name}. Your personal AI chief of staff is live.
 
 📸 Snap your task list → I read + schedule reminders
 🎙️ Voice note → transcribed + logged
 💬 Text anything → tasks, opps, updates
 ⏰ Proactive pings throughout the day
 
+*Customization:*
+/settings [text] — Configure how I behave or sound. 
+Example: `/settings You are JARVIS from Ironman. Be formal and call me Sir.`
+
 *Task commands:*
 /tasks — view active tasks
-/task 3 — view task details
-/done 3 — mark task done
-/edit 3 push farmIntel fix at 4pm — edit a task
-/del 3 — delete a task
+/task [id] — view task details
+/done [id] — mark task done
+/edit [id] [text] — edit a task
+/del [id] — delete a task
 /clear — wipe all active tasks
 
 *Opportunity commands:*
 /opps — view all opportunities
-/opp 2 — view opportunity details
+/opp [id] — view opportunity details
 /addobp [paste opp text] — AI parses deadline + details
-/dopp 2 — mark opportunity done
-/delopp 2 — delete an opportunity
-/editopp 2 deadline 2026-06-01 — update opp field
+/dopp [id] — mark opportunity done
+/delopp [id] — delete an opportunity
 
 *Other:*
-/remindme in 10 minutes do X
 /summary — weekly AI summary
 /help — full usage guide"""
     await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+# ── /settings ──────────────────────────────────────────────────────────────
+
+async def settings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not context.args:
+        user = await get_user(user_id)
+        current_context = user.get("context") if user else "Not set (using default Koded context)"
+        msg = f"""⚙️ *Your AI Settings*
+
+*Current Behavior/Context:*
+{current_context}
+
+To change how I behave or sound, use:
+`/settings [your instructions here]`
+
+Example:
+`/settings You are a pirate assistant. End every sentence with Arrr!`"""
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    new_context = " ".join(context.args)
+    await upsert_user(user_id, context=new_context)
+    await update.message.reply_text("✅ Settings updated. I'll behave as you requested from now on.", parse_mode="Markdown")
 
 
 # ── /help ──────────────────────────────────────────────────────────────────
@@ -108,7 +139,8 @@ Standup: 7:30am | Wind-down: 9pm | Weekly: Sunday 8pm 🦾"""
 
 async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all active tasks."""
-    tasks = await get_tasks(done=False)
+    user_id = update.effective_user.id
+    tasks = await get_tasks(user_id, done=False)
     if not tasks:
         await update.message.reply_text("✅ No active tasks. Drop your list and let's get moving.")
         return
@@ -125,12 +157,13 @@ async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def task_detail_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/task [id] — view full task details."""
+    user_id = update.effective_user.id
     args = context.args
     if not args or not args[0].isdigit():
         await update.message.reply_text("Usage: `/task 3`", parse_mode="Markdown")
         return
 
-    task = await get_task_by_id(int(args[0]))
+    task = await get_task_by_id(user_id, int(args[0]))
     if not task:
         await update.message.reply_text(f"❌ No task with ID `{args[0]}`", parse_mode="Markdown")
         return
@@ -152,22 +185,24 @@ _/done {task['id']} • /edit {task['id']} [new title] • /del {task['id']}_"""
 
 async def done_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/done [id] — mark task complete."""
+    user_id = update.effective_user.id
     args = context.args
     if not args or not args[0].isdigit():
         await update.message.reply_text("Usage: `/done 3`", parse_mode="Markdown")
         return
 
-    task = await get_task_by_id(int(args[0]))
+    task = await get_task_by_id(user_id, int(args[0]))
     if not task:
         await update.message.reply_text(f"❌ No task with ID `{args[0]}`", parse_mode="Markdown")
         return
 
-    await mark_task_done(int(args[0]))
+    await mark_task_done(user_id, int(args[0]))
     await update.message.reply_text(f"✅ Done: _{task['title']}_\n\nOne down. Keep going.", parse_mode="Markdown")
 
 
 async def edit_task_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/edit [id] [new title/time] — edit a task."""
+    user_id = update.effective_user.id
     args = context.args
     if not args or not args[0].isdigit() or len(args) < 2:
         await update.message.reply_text("Usage: `/edit 3 push farmIntel fix at 4pm`", parse_mode="Markdown")
@@ -176,7 +211,7 @@ async def edit_task_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     task_id = int(args[0])
     new_text = " ".join(args[1:])
 
-    task = await get_task_by_id(task_id)
+    task = await get_task_by_id(user_id, task_id)
     if not task:
         await update.message.reply_text(f"❌ No task with ID `{task_id}`", parse_mode="Markdown")
         return
@@ -197,28 +232,30 @@ async def edit_task_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         due_time = f"{hour:02d}:{minute:02d}"
         title = new_text[:time_match.start()].strip()
 
-    await update_task(task_id, title=title or task["title"], due_time=due_time or task["due_time"])
+    await update_task(user_id, task_id, title=title or task["title"], due_time=due_time or task["due_time"])
     await update.message.reply_text(f"✏️ Task `{task_id}` updated:\n_{title or task['title']}_" + (f"\nTime: `{due_time}`" if due_time else ""), parse_mode="Markdown")
 
 
 async def delete_task_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/del [id] — delete a task."""
+    user_id = update.effective_user.id
     args = context.args
     if not args or not args[0].isdigit():
         await update.message.reply_text("Usage: `/del 3`", parse_mode="Markdown")
         return
 
-    task = await get_task_by_id(int(args[0]))
+    task = await get_task_by_id(user_id, int(args[0]))
     if not task:
         await update.message.reply_text(f"❌ No task with ID `{args[0]}`", parse_mode="Markdown")
         return
 
-    await delete_task(int(args[0]))
+    await delete_task(user_id, int(args[0]))
     await update.message.reply_text(f"🗑️ Deleted: _{task['title']}_", parse_mode="Markdown")
 
 
 async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await clear_tasks()
+    user_id = update.effective_user.id
+    await clear_tasks(user_id)
     await update.message.reply_text("🗑️ All active tasks cleared. Fresh slate.")
 
 
@@ -226,7 +263,8 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def opportunities_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all open opportunities."""
-    opps = await get_opportunities(done=False)
+    user_id = update.effective_user.id
+    opps = await get_opportunities(user_id, done=False)
     if not opps:
         await update.message.reply_text("🎯 No opportunities tracked. Use /addobp [paste opp text] to add one.")
         return
@@ -259,12 +297,13 @@ async def opportunities_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def opp_detail_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/opp [id] — full opportunity details."""
+    user_id = update.effective_user.id
     args = context.args
     if not args or not args[0].isdigit():
         await update.message.reply_text("Usage: `/opp 2`", parse_mode="Markdown")
         return
 
-    opp = await get_opportunity_by_id(int(args[0]))
+    opp = await get_opportunity_by_id(user_id, int(args[0]))
     if not opp:
         await update.message.reply_text(f"❌ No opportunity with ID `{args[0]}`", parse_mode="Markdown")
         return
@@ -303,6 +342,7 @@ _/dopp {opp['id']} • /editopp {opp['id']} • /delopp {opp['id']}_"""
 
 async def add_opp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/addobp [paste any opp text] — AI parses everything."""
+    user_id = update.effective_user.id
     text = " ".join(context.args) if context.args else ""
 
     # Also check message caption or reply
@@ -318,9 +358,10 @@ async def add_opp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("🔍 Parsing opportunity...")
-    result = await parse_opportunity_from_text(text)
+    result = await parse_opportunity_from_text(user_id, text)
 
     opp_id = await add_opportunity(
+        user_id=user_id,
         title=result.get("title", text[:80]),
         opp_type=result.get("type", "general"),
         deadline=result.get("deadline"),
@@ -343,33 +384,35 @@ _/opp {opp_id} to view • /editopp {opp_id} deadline YYYY-MM-DD to fix deadline
 
 async def done_opp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/dopp [id] — mark opportunity as applied/done."""
+    user_id = update.effective_user.id
     args = context.args
     if not args or not args[0].isdigit():
         await update.message.reply_text("Usage: `/dopp 2`", parse_mode="Markdown")
         return
 
-    opp = await get_opportunity_by_id(int(args[0]))
+    opp = await get_opportunity_by_id(user_id, int(args[0]))
     if not opp:
         await update.message.reply_text(f"❌ No opportunity with ID `{args[0]}`", parse_mode="Markdown")
         return
 
-    await mark_opportunity_done(int(args[0]))
+    await mark_opportunity_done(user_id, int(args[0]))
     await update.message.reply_text(f"✅ Marked as done: _{opp['title']}_\n\nShot your shot. Respect.", parse_mode="Markdown")
 
 
 async def delete_opp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/delopp [id] — delete an opportunity."""
+    user_id = update.effective_user.id
     args = context.args
     if not args or not args[0].isdigit():
         await update.message.reply_text("Usage: `/delopp 2`", parse_mode="Markdown")
         return
 
-    opp = await get_opportunity_by_id(int(args[0]))
+    opp = await get_opportunity_by_id(user_id, int(args[0]))
     if not opp:
         await update.message.reply_text(f"❌ No opportunity with ID `{args[0]}`", parse_mode="Markdown")
         return
 
-    await delete_opportunity(int(args[0]))
+    await delete_opportunity(user_id, int(args[0]))
     await update.message.reply_text(f"🗑️ Deleted: _{opp['title']}_", parse_mode="Markdown")
 
 
@@ -380,6 +423,7 @@ async def edit_opp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
              /editopp 2 notes submitted via portal
              /editopp 2 link https://apply.microsoft.com
     """
+    user_id = update.effective_user.id
     args = context.args
     if not args or not args[0].isdigit() or len(args) < 3:
         await update.message.reply_text(
@@ -397,21 +441,22 @@ async def edit_opp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Unknown field `{field}`. Use: deadline, notes, link, title, type", parse_mode="Markdown")
         return
 
-    opp = await get_opportunity_by_id(opp_id)
+    opp = await get_opportunity_by_id(user_id, opp_id)
     if not opp:
         await update.message.reply_text(f"❌ No opportunity with ID `{opp_id}`", parse_mode="Markdown")
         return
 
-    await update_opportunity(opp_id, **{field: value})
+    await update_opportunity(user_id, opp_id, **{field: value})
     await update.message.reply_text(f"✏️ Opp `{opp_id}` updated:\n*{field}* → `{value}`", parse_mode="Markdown")
 
 
 # ── /summary ───────────────────────────────────────────────────────────────
 
 async def summary_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     await update.message.reply_text("⏳ Generating your weekly summary...")
-    logs = await get_week_logs()
-    tasks = await get_tasks(done=False)
-    opps = await get_opportunities(done=False)
-    summary = await generate_weekly_summary(logs, tasks, opps)
+    logs = await get_week_logs(user_id)
+    tasks = await get_tasks(user_id, done=False)
+    opps = await get_opportunities(user_id, done=False)
+    summary = await generate_weekly_summary(user_id, logs, tasks, opps)
     await update.message.reply_text(f"📊 *Weekly Summary*\n\n{summary}", parse_mode="Markdown")

@@ -88,7 +88,7 @@ def _generate_json(prompt, extra_parts=None) -> dict:
             logger.error(f"JSON parse error: {e}")
             return {}
         except Exception as e:
-            if "429" in str(e) or "quota" in str(e).lower():
+            if "429" in str(e) or "quota"     in str(e).lower():
                 logger.warning(f"Key #{_current_key_index + 1} rate limited. Rotating...")
                 _rotate_key()
                 continue
@@ -99,9 +99,18 @@ def _generate_json(prompt, extra_parts=None) -> dict:
 
 # ── Public API ─────────────────────────────────────────────────────────────
 
-async def chat_with_gemini(user_message: str, extra_context: str = "") -> str:
+async def get_effective_context(user_id: int) -> str:
+    """Fetch user-specific context or fallback to default."""
+    user = await get_user(user_id)
+    if user and user.get("context"):
+        return user["context"]
+    return KODED_CONTEXT
+
+
+async def chat_with_gemini(user_id: int, user_message: str, extra_context: str = "") -> str:
     """General chat — handles task logging, questions, freeform input."""
-    prompt = f"""{KODED_CONTEXT}
+    context = await get_effective_context(user_id)
+    prompt = f"""{context}
 
 {_get_date_context()}
 
@@ -110,7 +119,7 @@ async def chat_with_gemini(user_message: str, extra_context: str = "") -> str:
 USER MESSAGE:
 {user_message}
 
-Respond naturally as KODED OS. If the message contains tasks or to-dos, acknowledge them and confirm you've noted them.
+Respond naturally as the user's personal AI chief of staff. If the message contains tasks or to-dos, acknowledge them and confirm you've noted them.
 Keep it conversational and punchy. No markdown headers in replies — just clean text with occasional emojis."""
 
     try:
@@ -119,24 +128,25 @@ Keep it conversational and punchy. No markdown headers in replies — just clean
         return "⚠️ Gemini had a moment. Try again in a sec."
 
 
-async def parse_task_list_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
+async def parse_task_list_from_image(user_id: int, image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
     """
     Takes a photo of a task list and returns structured JSON.
     """
-    prompt = f"""{KODED_CONTEXT}
+    context = await get_effective_context(user_id)
+    prompt = f"""{context}
 
 {_get_date_context()}
 
-Koded just snapped a photo of his task list for today.
+The user just snapped a photo of their task list for today.
 
 Extract ALL tasks you can see. For each task:
-1. Identify which of his tracks it belongs to: skurel, teenovatex, stackd, setld, unilag, microsoft, mca, echobridge, hsil, personal, general
+1. Identify which track it belongs to.
 2. If a time is mentioned or implied, extract it as HH:MM (24h format)
 3. If no time, set due_time to null
 
 Also give:
 - A brief "summary" of what kind of day this is shaping up to be
-- A "vibe_check" — a short hype/roast about the workload (be real with him)
+- A "vibe_check" — a short hype/roast about the workload (be real with them)
 
 Return ONLY valid JSON. No explanation, no markdown fences:
 {{
@@ -155,25 +165,26 @@ Return ONLY valid JSON. No explanation, no markdown fences:
     return result
 
 
-async def parse_voice_message(audio_bytes: bytes, mime_type: str = "audio/ogg") -> dict:
+async def parse_voice_message(user_id: int, audio_bytes: bytes, mime_type: str = "audio/ogg") -> dict:
     """
     Transcribes voice note and extracts intent.
     """
-    prompt = f"""{KODED_CONTEXT}
+    context = await get_effective_context(user_id)
+    prompt = f"""{context}
 
 {_get_date_context()}
 
-Koded just sent a voice message.
+The user just sent a voice message.
 
 1. Transcribe it accurately
 2. Identify the intent:
-   - add_task: he's listing things to do
-   - add_opportunity: he's mentioning a hackathon, deadline, internship app
-   - standup: he's giving a morning/evening update on his day
+   - add_task: they're listing things to do
+   - add_opportunity: they're mentioning a hackathon, deadline, internship app
+   - standup: they're giving a morning/evening update on their day
    - general_chat: just talking
 
 3. Extract relevant structured data based on intent
-4. Write a natural "response" to send back to him
+4. Write a natural "response" to send back to them
 
 Return ONLY valid JSON:
 {{
@@ -198,13 +209,14 @@ Return ONLY valid JSON:
     return result
 
 
-async def parse_text_for_tasks(text: str) -> dict:
+async def parse_text_for_tasks(user_id: int, text: str) -> dict:
     """Parse freeform text for tasks/opportunities."""
-    prompt = f"""{KODED_CONTEXT}
+    context = await get_effective_context(user_id)
+    prompt = f"""{context}
 
 {_get_date_context()}
 
-Koded just texted: "{text}"
+The user just texted: "{text}"
 
 Determine if this contains:
 - Tasks to add (add_task)
@@ -224,19 +236,20 @@ Return ONLY valid JSON:
 
     result = _generate_json(prompt)
     if not result:
-        return {"intent": "general_chat", "tasks": [], "opportunity": {}, "response": await chat_with_gemini(text)}
+        return {"intent": "general_chat", "tasks": [], "opportunity": {}, "response": await chat_with_gemini(user_id, text)}
     return result
 
 
-async def parse_opportunity_from_text(text: str) -> dict:
+async def parse_opportunity_from_text(user_id: int, text: str) -> dict:
     """
     Parse a pasted opportunity description and extract structured data.
     """
-    prompt = f"""{KODED_CONTEXT}
+    context = await get_effective_context(user_id)
+    prompt = f"""{context}
 
 {_get_date_context()}
 
-Koded pasted this opportunity text. Extract all key details:
+The user pasted this opportunity text. Extract all key details:
 
 TEXT:
 {text}
@@ -244,9 +257,9 @@ TEXT:
 Rules:
 - title: short, clear name for this opportunity (max 80 chars)
 - type: one of hackathon, internship, deadline, event, grant, competition, general
-- deadline: extract the application/submission deadline as YYYY-MM-DD. If a month+day is given with no year, assume {datetime.now().year} unless it's already passed, then use {datetime.now().year + 1}. If no deadline found, return null.
+- deadline: extract the application/submission deadline as YYYY-MM-DD. If no deadline found, return null.
 - link: extract any URL present, or null
-- notes: 1-2 sentence summary of what this opportunity is and why it matters to Koded
+- notes: 1-2 sentence summary of what this opportunity is and why it matters
 
 Return ONLY valid JSON, no markdown:
 {{"title": "...", "type": "...", "deadline": "YYYY-MM-DD or null", "link": "... or null", "notes": "..."}}"""
@@ -257,12 +270,13 @@ Return ONLY valid JSON, no markdown:
     return result
 
 
-async def generate_reminder(task: dict, tasks_remaining: list) -> str:
+async def generate_reminder(user_id: int, task: dict, tasks_remaining: list) -> str:
     """Generate a contextual reminder ping for a specific task."""
+    context = await get_effective_context(user_id)
     remaining_titles = [t["title"] for t in tasks_remaining[:5]]
-    prompt = f"""{KODED_CONTEXT}
+    prompt = f"""{context}
 
-Time to remind Koded about: "{task['title']}" (track: {task.get('track', 'general')})
+Time to remind the user about: "{task['title']}" (track: {task.get('track', 'general')})
 
 Other tasks still pending today: {remaining_titles}
 
@@ -275,18 +289,19 @@ Be direct. No fluff. Include relevant emoji."""
         return f"⏰ Reminder: {task['title']}"
 
 
-async def generate_morning_standup() -> str:
+async def generate_morning_standup(user_id: int) -> str:
     """Generate morning standup prompt."""
-    prompt = f"""{KODED_CONTEXT}
+    context = await get_effective_context(user_id)
+    prompt = f"""{context}
 
 {_get_date_context()}
 
-It's morning standup time for Koded (7:30am Lagos time).
+It's morning standup time for the user.
 
 Write a short, energetic morning check-in message (3-5 sentences):
-- Greet him based on time of day
-- Ask what's on his plate today
-- Optional: drop a quick motivation hit or reminder about his bigger goals
+- Greet them based on time of day
+- Ask what's on their plate today
+- Optional: drop a quick motivation hit or reminder about their bigger goals
 - End with a clear prompt asking him to share his tasks for the day
 
 Keep it punchy, not corporate."""
@@ -294,19 +309,20 @@ Keep it punchy, not corporate."""
     try:
         return _generate(prompt)
     except Exception:
-        return "🌅 Morning Koded! What's on deck today? Drop your list and I'll keep you on track."
+        return "🌅 Morning! What's on deck today? Drop your list and I'll keep you on track."
 
 
-async def generate_evening_summary(tasks: list, logs: list) -> str:
+async def generate_evening_summary(user_id: int, tasks: list, logs: list) -> str:
     """Generate end-of-day summary."""
+    context = await get_effective_context(user_id)
     done = [t for t in tasks if t.get("done")]
     pending = [t for t in tasks if not t.get("done")]
 
-    prompt = f"""{KODED_CONTEXT}
+    prompt = f"""{context}
 
 {_get_date_context()}
 
-It's end of day for Koded (9pm Lagos time).
+It's end of day for the user.
 
 Today's stats:
 - Tasks completed: {len(done)} → {[t['title'] for t in done]}
@@ -326,15 +342,16 @@ Real talk, not corporate. Max 1-2 emojis."""
         return f"🌙 Day done. {len(done)} tasks wrapped, {len(pending)} still pending. How'd it go?"
 
 
-async def generate_weekly_summary(logs: list, tasks: list, opps: list) -> str:
+async def generate_weekly_summary(user_id: int, logs: list, tasks: list, opps: list) -> str:
     """Generate Sunday weekly summary."""
+    context = await get_effective_context(user_id)
     log_content = "\n".join([f"{l['type']} ({l['date']}): {l['content']}" for l in logs])
 
-    prompt = f"""{KODED_CONTEXT}
+    prompt = f"""{context}
 
 {_get_date_context()}
 
-It's Sunday — time for Koded's weekly summary.
+It's Sunday — time for the user's weekly summary.
 
 WEEK LOGS:
 {log_content if log_content else "No standup logs recorded this week"}
@@ -344,12 +361,12 @@ OPEN OPPORTUNITIES: {[o['title'] for o in opps[:5]]}
 
 Write a comprehensive weekly summary (8-12 sentences):
 1. What kind of week was it overall?
-2. Key wins across his tracks
+2. Key wins
 3. What slipped or got neglected
-4. Opportunities he needs to act on
+4. Opportunities they need to act on
 5. Energy/direction for next week
 
-Be like a trusted advisor who knows him well. Real, direct, caring."""
+Be like a trusted advisor who knows them well. Real, direct, caring."""
 
     try:
         return _generate(prompt)
