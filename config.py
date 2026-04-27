@@ -16,7 +16,16 @@ GEMINI_API_KEYS = [
 ]
 GEMINI_MODEL = "gemini-2.5-flash"
 
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+NVIDIA_API_KEYS = [
+    k for k in [
+        os.getenv("NVIDIA_API_KEY", ""),
+        os.getenv("NVIDIA_API_KEY_1", ""),
+        os.getenv("NVIDIA_API_KEY_2", ""),
+        os.getenv("NVIDIA_API_KEY_3", ""),
+    ] if k
+]
+# Back-compat alias
+NVIDIA_API_KEY = NVIDIA_API_KEYS[0] if NVIDIA_API_KEYS else ""
 NVIDIA_MODEL = "meta/llama-3.1-405b-instruct"
 
 KODED_CONTEXT = """

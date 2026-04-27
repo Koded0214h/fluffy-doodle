@@ -11,7 +11,7 @@ import google.generativeai as genai
 import httpx
 from config import (
     GEMINI_API_KEYS, GEMINI_MODEL, KODED_CONTEXT,
-    NVIDIA_API_KEY, NVIDIA_MODEL
+    NVIDIA_API_KEYS, NVIDIA_MODEL
 )
 from database import get_user
 
@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 # ── Key rotation state ─────────────────────────────────────────────────────
 
 _current_key_index = 0
+_current_nvidia_key_index = 0
 
 
 def _get_model():
@@ -31,23 +32,21 @@ def _get_model():
 
 
 def _rotate_key():
-    """Switch to next available API key."""
+    """Switch to next available Gemini API key."""
     global _current_key_index
     _current_key_index = (_current_key_index + 1) % len(GEMINI_API_KEYS)
     logger.info(f"🔄 Rotated to Gemini key #{_current_key_index + 1}")
 
 
 async def _nvidia_generate(prompt: str) -> str:
-    """Fallback to NVIDIA (Llama 3.1) if Gemini is down."""
-    if not NVIDIA_API_KEY:
+    """Fallback to NVIDIA (Llama 3.1) with multi-key rotation on 429."""
+    global _current_nvidia_key_index
+
+    if not NVIDIA_API_KEYS:
+        logger.warning("No NVIDIA API keys configured — skipping fallback")
         return ""
-    
-    logger.info("⚡ Falling back to NVIDIA API...")
+
     url = "https://integrate.api.nvidia.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {NVIDIA_API_KEY}",
-        "Content-Type": "application/json",
-    }
     payload = {
         "model": NVIDIA_MODEL,
         "messages": [{"role": "user", "content": prompt}],
@@ -55,15 +54,30 @@ async def _nvidia_generate(prompt: str) -> str:
         "top_p": 0.7,
         "max_tokens": 1024,
     }
-    
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        logger.error(f"NVIDIA fallback failed: {e}")
-        return ""
+
+    for attempt in range(len(NVIDIA_API_KEYS)):
+        key = NVIDIA_API_KEYS[_current_nvidia_key_index]
+        logger.info(f"⚡ Trying NVIDIA key #{_current_nvidia_key_index + 1} (attempt {attempt + 1}/{len(NVIDIA_API_KEYS)})")
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+                if resp.status_code == 429:
+                    logger.warning(f"NVIDIA key #{_current_nvidia_key_index + 1} rate limited. Rotating...")
+                    _current_nvidia_key_index = (_current_nvidia_key_index + 1) % len(NVIDIA_API_KEYS)
+                    continue
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"NVIDIA key #{_current_nvidia_key_index + 1} failed: {e}")
+            _current_nvidia_key_index = (_current_nvidia_key_index + 1) % len(NVIDIA_API_KEYS)
+            continue
+
+    logger.error("All NVIDIA keys exhausted or rate limited")
+    return ""
 
 
 async def _generate(prompt, extra_parts=None) -> str:
